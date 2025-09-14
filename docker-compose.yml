@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  ielts-monitor-bot:
+    build: .
+    container_name: ielts-monitor-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - TARGET_URL=${TARGET_URL:-http://prep.bilkent.edu.tr/ielts/}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-5}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      # Persistent volume for bot state
+      - bot-state:/app/data
+    # Uncomment if you want to expose a port for health checks
+    # ports:
+    #   - "3000:3000"
+
+volumes:
+  bot-state:
+    driver: local
