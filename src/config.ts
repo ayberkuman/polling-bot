@@ -9,6 +9,7 @@ export interface Config {
   targetUrl: string;
   checkInterval: number;
   logLevel: string;
+  adminPassword: string;
 }
 
 export const config: Config = {
@@ -18,7 +19,8 @@ export const config: Config = {
     : [],
   targetUrl: process.env.TARGET_URL || 'http://prep.bilkent.edu.tr/ielts/',
   checkInterval: parseInt(process.env.CHECK_INTERVAL || '1'),
-  logLevel: process.env.LOG_LEVEL || 'info'
+  logLevel: process.env.LOG_LEVEL || 'info',
+  adminPassword: process.env.ADMIN_PASSWORD || ''
 };
 
 // Validate required configuration
@@ -29,6 +31,10 @@ export function validateConfig(): void {
 
   if (!config.targetUrl) {
     throw new Error('TARGET_URL is required.');
+  }
+
+  if (!config.adminPassword) {
+    throw new Error('ADMIN_PASSWORD is required. Please set it in your .env file.');
   }
 
   // CHAT_IDS is now optional since we use automatic subscription

@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { config } from './config';
 import { logger } from './logger';
 import { StateManager } from './stateManager';
+import type { UserRequest } from './types';
 
 export class TelegramBotManager {
   private bot: TelegramBot;
@@ -17,37 +18,75 @@ export class TelegramBotManager {
     // Handle /start command
     this.bot.onText(/\/start/, (msg) => {
       const chatId = msg.chat.id;
-      const isNewUser = this.stateManager.addChatId(chatId);
-      const subscriberCount = this.stateManager.getSubscriberCount();
 
-      let welcomeMessage = `
+      // Check if user is already subscribed
+      if (this.stateManager.isSubscribed(chatId)) {
+        const subscriberCount = this.stateManager.getSubscriberCount();
+        const welcomeMessage = `
 🎓 *Bilkent IELTS Exam Date Monitor*
 
-Bu bot, Bilkent Üniversitesi IELTS sınav tarihlerini takip eder ve değişiklik olduğunda sizi bilgilendirir.
+✅ *Zaten kayıtlısınız!*
 
-📅 *Mevcut Özellikler:*
-• Her 5 dakikada bir sınav tarihlerini kontrol eder
-• Tarih değişikliklerinde otomatik bildirim gönderir
-• Hem sınav tarihini hem de başvuru son tarihini takip eder
+📊 Toplam abone sayısı: ${subscriberCount}
 
 🔧 *Komutlar:*
 /status - Bot durumunu kontrol et
 /unsubscribe - Bildirimleri durdur
-/subscribe - Bildirimleri tekrar başlat
-/help - Bu yardım mesajını göster
+/help - Yardım mesajını göster
 
+Bot aktif ve çalışıyor! 🚀
 `;
-
-      if (isNewUser) {
-        welcomeMessage += `✅ *Başarıyla kayıt oldunuz!*\n📊 Toplam abone sayısı: ${subscriberCount}\n\n`;
-      } else {
-        welcomeMessage += `ℹ️ Zaten kayıtlısınız.\n📊 Toplam abone sayısı: ${subscriberCount}\n\n`;
+        this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+        return;
       }
 
-      welcomeMessage += `Bot aktif ve çalışıyor! 🚀`;
+      // User is not subscribed, create access request
+      const userRequest: UserRequest = {
+        chatId: chatId,
+        username: msg.from?.username,
+        firstName: msg.from?.first_name,
+        lastName: msg.from?.last_name,
+        requestTime: new Date()
+      };
 
-      this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
-      logger.info(`User interaction: ${chatId} (${isNewUser ? 'new' : 'existing'})`);
+      const requestAdded = this.stateManager.addPendingRequest(userRequest);
+
+      if (requestAdded) {
+        // Notify user
+        const requestMessage = `
+🎓 *Bilkent IELTS Exam Date Monitor*
+
+📝 *Erişim Talebi Gönderildi*
+
+Erişim talebiniz yöneticiye iletildi. Onaylandıktan sonra IELTS sınav tarihi bildirimlerini almaya başlayacaksınız.
+
+⏳ Lütfen onay için bekleyin...
+
+🔧 *Komutlar:*
+/status - Talep durumunu kontrol et
+/help - Yardım mesajını göster
+`;
+        this.bot.sendMessage(chatId, requestMessage, { parse_mode: 'Markdown' });
+
+        // Notify admin
+        this.notifyAdminOfNewRequest(userRequest);
+      } else {
+        // Request already exists
+        const pendingMessage = `
+🎓 *Bilkent IELTS Exam Date Monitor*
+
+⏳ *Bekleyen Talep*
+
+Zaten bir erişim talebiniz bulunmaktadır. Lütfen onay için bekleyin...
+
+🔧 *Komutlar:*
+/status - Talep durumunu kontrol et
+/help - Yardım mesajını göster
+`;
+        this.bot.sendMessage(chatId, pendingMessage, { parse_mode: 'Markdown' });
+      }
+
+      logger.info(`Access request from user: ${chatId} (${msg.from?.username || 'no username'})`);
     });
 
     // Handle /status command
@@ -55,8 +94,10 @@ Bu bot, Bilkent Üniversitesi IELTS sınav tarihlerini takip eder ve değişikli
       const chatId = msg.chat.id;
       const subscriberCount = this.stateManager.getSubscriberCount();
       const isSubscribed = this.stateManager.isSubscribed(chatId);
+      const pendingRequests = this.stateManager.getPendingRequests();
+      const hasPendingRequest = pendingRequests.some(req => req.chatId === chatId);
 
-      const statusMessage = `
+      let statusMessage = `
 📊 *Bot Durumu*
 
 ✅ Bot aktif ve çalışıyor
@@ -64,10 +105,17 @@ Bu bot, Bilkent Üniversitesi IELTS sınav tarihlerini takip eder ve değişikli
 🎯 Hedef URL: ${config.targetUrl}
 ⏰ Kontrol aralığı: ${config.checkInterval} dakika
 👥 Toplam abone sayısı: ${subscriberCount}
-${isSubscribed ? '✅ Siz abonesiniz' : '❌ Siz abone değilsiniz'}
+`;
 
-Bot düzenli olarak sınav tarihlerini kontrol ediyor. Değişiklik olduğunda abone olan kullanıcılara bildirim gönderecek.
-      `;
+      if (isSubscribed) {
+        statusMessage += `✅ Siz abonesiniz`;
+      } else if (hasPendingRequest) {
+        statusMessage += `⏳ Bekleyen erişim talebiniz var`;
+      } else {
+        statusMessage += `❌ Siz abone değilsiniz`;
+      }
+
+      statusMessage += `\n\nBot düzenli olarak sınav tarihlerini kontrol ediyor. Değişiklik olduğunda abone olan kullanıcılara bildirim gönderecek.`;
 
       this.bot.sendMessage(chatId, statusMessage, { parse_mode: 'Markdown' });
     });
@@ -88,9 +136,16 @@ Bot düzenli olarak sınav tarihlerini kontrol ediyor. Değişiklik olduğunda a
       }
     });
 
-    // Handle /subscribe command
+    // Handle /subscribe command (only for approved users)
     this.bot.onText(/\/subscribe/, (msg) => {
       const chatId = msg.chat.id;
+
+      if (!this.stateManager.isSubscribed(chatId)) {
+        const message = `❌ *Erişim Gerekli*\n\nÖnce erişim talebinde bulunmanız gerekiyor.\n\n/start komutunu kullanarak erişim talebinde bulunabilirsiniz.`;
+        this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        return;
+      }
+
       const isNewUser = this.stateManager.addChatId(chatId);
       const subscriberCount = this.stateManager.getSubscriberCount();
 
@@ -118,9 +173,9 @@ Bu bot Bilkent Üniversitesi IELTS sınav tarihlerini takip eder.
 3. Bildirimler otomatik olarak tüm kayıtlı kullanıcılara gönderilir
 
 🔧 *Komutlar:*
-/start - Botu başlat ve otomatik olarak abone ol
+/start - Erişim talebinde bulun
 /status - Bot durumunu kontrol et
-/subscribe - Bildirimleri aktif et
+/subscribe - Bildirimleri aktif et (onaylı kullanıcılar için)
 /unsubscribe - Bildirimleri durdur
 /help - Bu yardım mesajını göster
 
@@ -130,6 +185,9 @@ Sorularınız için bot geliştiricisi ile iletişime geçebilirsiniz.
 
       this.bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
     });
+
+    // Admin commands
+    this.setupAdminCommands();
 
     // Handle errors
     this.bot.on('error', (error) => {
@@ -229,6 +287,232 @@ Bot çalışıyor ve mesaj gönderebiliyor!
     });
 
     await Promise.allSettled(promises);
+  }
+
+  private setupAdminCommands(): void {
+    // Set admin command
+    this.bot.onText(/\/admin_set (.+)/, (msg, match) => {
+      const chatId = msg.chat.id;
+      const password = match?.[1];
+
+      if (password !== config.adminPassword) {
+        this.bot.sendMessage(chatId, '❌ Geçersiz admin şifresi.', { parse_mode: 'Markdown' });
+        logger.warn(`Failed admin attempt from chat ID: ${chatId}`);
+        return;
+      }
+
+      this.stateManager.setAdminChatId(chatId);
+      this.bot.sendMessage(chatId, `✅ Admin olarak ayarlandınız! Chat ID: ${chatId}`, { parse_mode: 'Markdown' });
+      logger.info(`Admin set to chat ID: ${chatId}`);
+    });
+
+    // List pending requests
+    this.bot.onText(/\/admin_requests/, (msg) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        this.bot.sendMessage(chatId, '❌ Bu komut sadece adminler için.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const pendingRequests = this.stateManager.getPendingRequests();
+      if (pendingRequests.length === 0) {
+        this.bot.sendMessage(chatId, '📋 Bekleyen erişim talebi yok.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      let message = `📋 *Bekleyen Erişim Talepleri (${pendingRequests.length}):*\n\n`;
+      pendingRequests.forEach((req, index) => {
+        const userInfo = `${req.firstName || ''} ${req.lastName || ''}`.trim() || 'İsimsiz';
+        const username = req.username ? `@${req.username}` : 'Kullanıcı adı yok';
+        const time = req.requestTime.toLocaleString('tr-TR');
+
+        message += `${index + 1}. *${userInfo}*\n`;
+        message += `   👤 ${username}\n`;
+        message += `   🆔 Chat ID: \`${req.chatId}\`\n`;
+        message += `   🕐 ${time}\n\n`;
+      });
+
+      message += `\n🔧 *Komutlar:*\n`;
+      message += `/admin_approve <chat_id> - Kullanıcıyı onayla\n`;
+      message += `/admin_reject <chat_id> - Kullanıcıyı reddet`;
+
+      this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    });
+
+    // Approve user
+    this.bot.onText(/\/admin_approve (.+)/, (msg, match) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        this.bot.sendMessage(chatId, '❌ Bu komut sadece adminler için.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const targetChatId = parseInt(match?.[1] || '');
+      if (Number.isNaN(targetChatId)) {
+        this.bot.sendMessage(chatId, '❌ Geçersiz chat ID.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Remove from pending requests
+      const wasRemoved = this.stateManager.removePendingRequest(targetChatId);
+      if (!wasRemoved) {
+        this.bot.sendMessage(chatId, `❌ Chat ID ${targetChatId} için bekleyen talep bulunamadı.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Add to subscribed users
+      this.stateManager.addChatId(targetChatId);
+      const subscriberCount = this.stateManager.getSubscriberCount();
+
+      // Notify user
+      const approvalMessage = `
+🎉 *Erişim Onaylandı!*
+
+✅ IELTS sınav tarihi bildirimlerine erişiminiz onaylandı!
+
+📊 Toplam abone sayısı: ${subscriberCount}
+
+🔧 *Komutlar:*
+/status - Bot durumunu kontrol et
+/subscribe - Bildirimleri aktif et
+/unsubscribe - Bildirimleri durdur
+
+Bot aktif ve çalışıyor! 🚀
+`;
+      this.bot.sendMessage(targetChatId, approvalMessage, { parse_mode: 'Markdown' });
+
+      // Notify admin
+      this.bot.sendMessage(chatId, `✅ Chat ID ${targetChatId} onaylandı ve abone yapıldı.\n📊 Toplam abone sayısı: ${subscriberCount}`, { parse_mode: 'Markdown' });
+
+      logger.info(`User approved: ${targetChatId}`);
+    });
+
+    // Reject user
+    this.bot.onText(/\/admin_reject (.+)/, (msg, match) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        this.bot.sendMessage(chatId, '❌ Bu komut sadece adminler için.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const targetChatId = parseInt(match?.[1] || '');
+      if (Number.isNaN(targetChatId)) {
+        this.bot.sendMessage(chatId, '❌ Geçersiz chat ID.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Remove from pending requests
+      const wasRemoved = this.stateManager.removePendingRequest(targetChatId);
+      if (!wasRemoved) {
+        this.bot.sendMessage(chatId, `❌ Chat ID ${targetChatId} için bekleyen talep bulunamadı.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      // Notify user
+      const rejectionMessage = `
+❌ *Erişim Reddedildi*
+
+Maalesef erişim talebiniz reddedildi.
+
+Daha fazla bilgi için bot geliştiricisi ile iletişime geçebilirsiniz.
+`;
+      this.bot.sendMessage(targetChatId, rejectionMessage, { parse_mode: 'Markdown' });
+
+      // Notify admin
+      this.bot.sendMessage(chatId, `❌ Chat ID ${targetChatId} reddedildi.`, { parse_mode: 'Markdown' });
+
+      logger.info(`User rejected: ${targetChatId}`);
+    });
+
+    // List all users
+    this.bot.onText(/\/admin_users/, (msg) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        this.bot.sendMessage(chatId, '❌ Bu komut sadece adminler için.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const subscribedChatIds = this.stateManager.getSubscribedChatIds();
+      const subscriberCount = subscribedChatIds.length;
+
+      if (subscriberCount === 0) {
+        this.bot.sendMessage(chatId, '👥 Henüz abone yok.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      let message = `👥 *Abone Listesi (${subscriberCount}):*\n\n`;
+      subscribedChatIds.forEach((id, index) => {
+        message += `${index + 1}. Chat ID: \`${id}\`\n`;
+      });
+
+      message += `\n🔧 *Komutlar:*\n`;
+      message += `/admin_remove <chat_id> - Kullanıcıyı kaldır`;
+
+      this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    });
+
+    // Remove user
+    this.bot.onText(/\/admin_remove (.+)/, (msg, match) => {
+      const chatId = msg.chat.id;
+      if (!this.isAdmin(chatId)) {
+        this.bot.sendMessage(chatId, '❌ Bu komut sadece adminler için.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const targetChatId = parseInt(match?.[1] || '');
+      if (Number.isNaN(targetChatId)) {
+        this.bot.sendMessage(chatId, '❌ Geçersiz chat ID.', { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const wasRemoved = this.stateManager.removeChatId(targetChatId);
+      if (!wasRemoved) {
+        this.bot.sendMessage(chatId, `❌ Chat ID ${targetChatId} abone listesinde bulunamadı.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const subscriberCount = this.stateManager.getSubscriberCount();
+      this.bot.sendMessage(chatId, `✅ Chat ID ${targetChatId} abone listesinden kaldırıldı.\n📊 Kalan abone sayısı: ${subscriberCount}`, { parse_mode: 'Markdown' });
+
+      logger.info(`User removed: ${targetChatId}`);
+    });
+  }
+
+  private isAdmin(chatId: number): boolean {
+    const adminChatId = this.stateManager.getAdminChatId();
+    return adminChatId === chatId;
+  }
+
+  private notifyAdminOfNewRequest(userRequest: UserRequest): void {
+    const adminChatId = this.stateManager.getAdminChatId();
+    if (!adminChatId) {
+      logger.warn('No admin chat ID set, cannot notify of new request');
+      return;
+    }
+
+    const userInfo = `${userRequest.firstName || ''} ${userRequest.lastName || ''}`.trim() || 'İsimsiz';
+    const username = userRequest.username ? `@${userRequest.username}` : 'Kullanıcı adı yok';
+    const time = userRequest.requestTime.toLocaleString('tr-TR');
+    const pendingCount = this.stateManager.getPendingRequestCount();
+
+    const message = `
+🔔 *Yeni Erişim Talebi*
+
+👤 *Kullanıcı:* ${userInfo}
+🆔 *Chat ID:* \`${userRequest.chatId}\`
+👤 *Kullanıcı Adı:* ${username}
+🕐 *Tarih:* ${time}
+
+📋 *Bekleyen Toplam Talep:* ${pendingCount}
+
+🔧 *Komutlar:*
+/admin_approve ${userRequest.chatId} - Onayla
+/admin_reject ${userRequest.chatId} - Reddet
+/admin_requests - Tüm talepleri görüntüle
+`;
+
+    this.bot.sendMessage(adminChatId, message, { parse_mode: 'Markdown' });
+    logger.info(`Admin notified of new request from ${userRequest.chatId}`);
   }
 
   getBot(): TelegramBot {

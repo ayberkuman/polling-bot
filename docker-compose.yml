@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - TARGET_URL=${TARGET_URL:-http://prep.bilkent.edu.tr/ielts/}
       - CHECK_INTERVAL=${CHECK_INTERVAL:-5}
       - LOG_LEVEL=${LOG_LEVEL:-info}

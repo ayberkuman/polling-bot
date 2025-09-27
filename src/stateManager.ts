@@ -1,13 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { BotState } from './types';
+import type { BotState, UserRequest } from './types';
 import { logger } from './logger';
 
 export class StateManager {
   private stateFile: string;
   private state: BotState;
 
-  constructor(stateFilePath: string = './bot-state.json') {
+  constructor(stateFilePath: string = './data/bot-state.json') {
+    // Ensure data directory exists
+    const dataDir = path.dirname(stateFilePath);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+
     this.stateFile = path.resolve(stateFilePath);
     this.state = this.loadState();
   }
@@ -28,6 +34,19 @@ export class StateManager {
           parsedState.subscribedChatIds = [];
         }
 
+        // Ensure pendingRequests exists (for backward compatibility)
+        if (!parsedState.pendingRequests) {
+          parsedState.pendingRequests = [];
+        }
+
+        // Convert request dates back to Date objects
+        if (parsedState.pendingRequests) {
+          parsedState.pendingRequests = parsedState.pendingRequests.map((req: UserRequest & { requestTime: string; }) => ({
+            ...req,
+            requestTime: new Date(req.requestTime)
+          }));
+        }
+
         logger.info('Loaded existing state from file');
         return parsedState;
       }
@@ -41,7 +60,8 @@ export class StateManager {
       lastApplicationDeadline: null,
       lastNotificationSent: null,
       isInitialized: false,
-      subscribedChatIds: []
+      subscribedChatIds: [],
+      pendingRequests: []
     };
   }
 
@@ -129,6 +149,49 @@ export class StateManager {
     return this.state.subscribedChatIds.includes(chatId);
   }
 
+  // Admin and request management methods
+  setAdminChatId(chatId: number): void {
+    this.state.adminChatId = chatId;
+    this.saveState();
+    logger.info(`Admin chat ID set to: ${chatId}`);
+  }
+
+  getAdminChatId(): number | undefined {
+    return this.state.adminChatId;
+  }
+
+  addPendingRequest(userRequest: UserRequest): boolean {
+    // Check if request already exists
+    const existingRequest = this.state.pendingRequests.find(req => req.chatId === userRequest.chatId);
+    if (existingRequest) {
+      return false; // Request already exists
+    }
+
+    this.state.pendingRequests.push(userRequest);
+    this.saveState();
+    logger.info(`Added pending request from chat ID: ${userRequest.chatId}`);
+    return true;
+  }
+
+  removePendingRequest(chatId: number): boolean {
+    const index = this.state.pendingRequests.findIndex(req => req.chatId === chatId);
+    if (index > -1) {
+      this.state.pendingRequests.splice(index, 1);
+      this.saveState();
+      logger.info(`Removed pending request for chat ID: ${chatId}`);
+      return true;
+    }
+    return false;
+  }
+
+  getPendingRequests(): UserRequest[] {
+    return [...this.state.pendingRequests];
+  }
+
+  getPendingRequestCount(): number {
+    return this.state.pendingRequests.length;
+  }
+
   // Method to manually reset state (useful for testing)
   resetState(): void {
     this.state = {
@@ -136,7 +199,8 @@ export class StateManager {
       lastApplicationDeadline: null,
       lastNotificationSent: null,
       isInitialized: false,
-      subscribedChatIds: []
+      subscribedChatIds: [],
+      pendingRequests: []
     };
     this.saveState();
     logger.info('State has been reset');
