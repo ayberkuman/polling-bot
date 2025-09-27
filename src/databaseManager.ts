@@ -1,4 +1,4 @@
-import { BotState } from './types';
+import type { BotState } from './types';
 import { logger } from './logger';
 
 // Simple in-memory database for serverless deployments
@@ -12,7 +12,8 @@ class DatabaseManager {
       lastApplicationDeadline: null,
       lastNotificationSent: null,
       isInitialized: false,
-      subscribedChatIds: []
+      subscribedChatIds: [],
+      pendingRequests: []
     };
   }
 
@@ -35,6 +36,9 @@ class DatabaseManager {
         }
         if (!parsedState.subscribedChatIds) {
           parsedState.subscribedChatIds = [];
+        }
+        if (!parsedState.pendingRequests) {
+          parsedState.pendingRequests = [];
         }
         this.state = parsedState;
         logger.info('Loaded state from environment variables');
@@ -144,7 +148,8 @@ class DatabaseManager {
       lastApplicationDeadline: null,
       lastNotificationSent: null,
       isInitialized: false,
-      subscribedChatIds: []
+      subscribedChatIds: [],
+      pendingRequests: []
     };
     this.saveState();
     logger.info('State has been reset');
